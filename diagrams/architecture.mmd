@@ -1,0 +1,70 @@
+%% VibeFinder 2.0 — AI Concierge architecture
+%% Plan -> Act -> Check -> Respond agentic pipeline built around the
+%% original deterministic recommender (src/recommender.py, unchanged).
+flowchart TD
+    User(["Listener types a free-text request\n(Streamlit UI or CLI)"])
+
+    subgraph Plan["1. PLAN — src/agent.py: extract_preferences()"]
+        direction TB
+        NLU{"GEMINI_API_KEY set\nand request succeeds?"}
+        LLM["Gemini structured extraction\n(response_schema=ExtractedPreferences)"]
+        Heuristic["Rule-based keyword extractor\n(_heuristic_extract, offline, deterministic)"]
+        NLU -- yes --> LLM
+        NLU -- "no / error / refused /\nfailed schema validation" --> Heuristic
+    end
+
+    SchemaGuard["Guardrail: pydantic schema + range\nvalidation (0.0-1.0), finish_reason check"]
+    Prefs[("Structured preferences\nfavorite_genre, favorite_mood,\ntarget_energy/valence/danceability")]
+
+    subgraph Act["2. ACT — src/recommender.py (unchanged, deterministic)"]
+        direction TB
+        Retriever["recommend_songs()\nscores every song in data/songs.csv,\nreturns top-k with reasons"]
+    end
+
+    subgraph Check["3. CHECK — src/agent.py: check_recommendations()"]
+        direction TB
+        Coverage{"Does the catalog actually\ncontain that genre/mood?"}
+        Warn["Emit plain-language warning\n(e.g. genre not in catalog)"]
+        Coverage -- no --> Warn
+    end
+
+    subgraph Respond["4. RESPOND — src/agent.py: generate_explanation()"]
+        direction TB
+        ExplainNLU{"GEMINI_API_KEY set\nand request succeeds?"}
+        ExplainLLM["Gemini explanation, grounded ONLY in\nthe scored results from step 2\n(no invented song facts)"]
+        Template["Template explanation built\ndirectly from score + reasons"]
+        ExplainNLU -- yes --> ExplainLLM
+        ExplainNLU -- "no / error / refused /\nempty or oversized text" --> Template
+    end
+
+    Output(["Ranked songs + explanation + warnings\n+ extraction mode & confidence shown to user"])
+    Log[("logs/interactions.log\nevery run: input, mode, confidence,\nfallback reason, top pick")]
+
+    User --> NLU
+    LLM --> SchemaGuard
+    Heuristic --> SchemaGuard
+    SchemaGuard --> Prefs
+    Prefs --> Retriever
+    Prefs --> Coverage
+    Retriever --> ExplainNLU
+    Retriever --> Output
+    Warn --> Output
+    Coverage -- yes --> Output
+    ExplainLLM --> Output
+    Template --> Output
+
+    Plan -.logs.-> Log
+    Respond -.logs.-> Log
+
+    subgraph Tests["Reliability / human-in-the-loop"]
+        direction TB
+        Pytest["tests/test_agent.py\n(mocked LLM: fallback, guardrail,\ninjection, schema-validation tests)"]
+        Reliability["scripts/evaluate_reliability.py\n8 realistic + adversarial cases\n-> reliability_report.md"]
+        Dev["Developer review\n(model_card.md evaluation + reflection)"]
+    end
+
+    Log -.reviewed by.-> Dev
+    Output -.sample transcripts reviewed by.-> Dev
+    Pytest -.validates.-> Plan
+    Pytest -.validates.-> Respond
+    Reliability -.exercises full pipeline.-> Output
